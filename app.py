@@ -79,73 +79,64 @@ def limpiar_mapa_rendimiento(df):
 def obtener_color_zona(nombre_zona):
     nombre = str(nombre_zona).lower()
     if "alta" in nombre or "zona 1" in nombre:
-        return "#2ea043"  # Verde (Alto NDVI)
+        return "#2ea043"  # Verde (Mayor Cobertura Vegetal / Mayor NDVI)
     elif "media" in nombre or "zona 2" in nombre:
-        return "#f1e05a"  # Amarillo (NDVI Medio)
+        return "#f1e05a"  # Amarillo (Cobertura Media)
     elif "baja" in nombre or "zona 3" in nombre:
-        return "#da3633"  # Rojo (Bajo NDVI)
+        return "#da3633"  # Rojo (Baja Cobertura Vegetal / Menor NDVI)
     else:
-        return "#8b949e"  # Gris
+        return "#8b949e"
 
 def suavizar_poligono(poly, buffer_dist):
     """Aplica suavizado de bordes redondeados a una geometría plana."""
     if poly.is_empty:
         return poly
-    # Cierre morfológico: buffer positivo y luego negativo con redondeo de vértices
     smooth_poly = poly.buffer(buffer_dist, join_style=1).buffer(-buffer_dist, join_style=1)
-    # Simplificación ligera para eliminar vértices en zig-zag sin perder la forma curva
     smooth_poly = smooth_poly.simplify(buffer_dist * 0.25, preserve_topology=True)
     return smooth_poly
 
 def generar_zonas_agronomicas_suaves(poly_lote, num_zonas, f_inicio, f_fin, num_imagenes):
     """
-    Genera manchas agronómicas continuas con bordes curvos redondeados basándose
-    en la integración espectral multitemporal (NDVI + EVI + NDWI).
+    Genera zonas agronómicas continuas con bordes redondeados.
+    CRITERIO CORREGIDO: Mayor NDVI/EVI = ALTA PRODUCTIVIDAD (Verde).
     """
     xmin, ymin, xmax, ymax = poly_lote.bounds
     rows, cols = 50, 50
     x_coords = np.linspace(xmin, xmax, cols + 1)
     y_coords = np.linspace(ymin, ymax, rows + 1)
     
-    # Tamaño de la celda en grados para suavizado proporcional
     cell_width = (xmax - xmin) / cols
     buffer_suavizado = cell_width * 1.4
     
     grid_cells = []
     features_data = []
     
-    # Rejilla normalizada
     X_mat, Y_mat = np.meshgrid(np.linspace(0, 1, cols), np.linspace(0, 1, rows))
     
     # -------------------------------------------------------------------------
-    # MODELADO AGRONÓMICO MULTITEMPORAL MULTIESPECTRAL
+    # MODELADO AGRONÓMICO MULTITEMPORAL
     # -------------------------------------------------------------------------
     np.random.seed(100)
     
-    # 1. Base topográfica y de suelo (Patrón espacial de ambientes)
-    patron_suelo = 0.4 + 0.3 * np.sin(2.2 * np.pi * X_mat) * np.cos(1.8 * np.pi * Y_mat) + 0.15 * np.cos(3.0 * X_mat)
+    # Patrón de vigor fotosintético y biomasa
+    patron_vigor = 0.4 + 0.3 * np.sin(2.2 * np.pi * X_mat) * np.cos(1.8 * np.pi * Y_mat) + 0.15 * np.cos(3.0 * X_mat)
     
-    # 2. Simulación multitemporal: promedio de N imágenes satelitales en el período
     matriz_ndvi_multitemporal = np.zeros((rows, cols))
     matriz_evi_multitemporal = np.zeros((rows, cols))
-    matriz_ndwi_multitemporal = np.zeros((rows, cols))
     
     for _ in range(num_imagenes):
-        ruido_satelital = np.random.normal(0, 0.05, (rows, cols))
-        img_ndvi = np.clip(patron_suelo + ruido_satelital, 0.1, 0.88)
-        img_evi = np.clip(img_ndvi * 0.85 + 0.03, 0.08, 0.75)
-        img_ndwi = np.clip(0.5 - img_ndvi * 0.4, -0.2, 0.4)
+        ruido_satelital = np.random.normal(0, 0.04, (rows, cols))
+        img_ndvi = np.clip(patron_vigor + ruido_satelital, 0.1, 0.90)
+        img_evi = np.clip(img_ndvi * 0.88, 0.08, 0.80)
         
         matriz_ndvi_multitemporal += img_ndvi
         matriz_evi_multitemporal += img_evi
-        matriz_ndwi_multitemporal += img_ndwi
         
     matriz_ndvi = matriz_ndvi_multitemporal / num_imagenes
     matriz_evi = matriz_evi_multitemporal / num_imagenes
-    matriz_ndwi = matriz_ndwi_multitemporal / num_imagenes
     
-    # Índice Agro-Sintético Combinado (Mayor peso a vigor fotosintético y estabilidad hídrica)
-    indice_agronomico = (matriz_ndvi * 0.5) + (matriz_evi * 0.3) - (matriz_ndwi * 0.2)
+    # Índice Agro-Sintético: DIRECTAMENTE PROPORCIONAL al NDVI y EVI
+    indice_agronomico = (matriz_ndvi * 0.65) + (matriz_evi * 0.35)
     
     for i in range(rows):
         for j in range(cols):
@@ -162,28 +153,33 @@ def generar_zonas_agronomicas_suaves(poly_lote, num_zonas, f_inicio, f_fin, num_
 
     features_array = np.array(features_data)
     
-    # Normalización espacial y agronómica para clustering de ambientes
     X_norm = (features_array[:, 0] - xmin) / (xmax - xmin)
     Y_norm = (features_array[:, 1] - ymin) / (ymax - ymin)
     NDVI_vals = features_array[:, 2]
     AGRO_vals = features_array[:, 3]
     
-    # Vector de clustering: pondera la contigüidad espacial y la firma multiespectral
-    X_clustering = np.column_stack([X_norm * 0.35, Y_norm * 0.35, AGRO_vals * 2.2])
+    # Clustering integrando posición espacial y potencial de biomasa
+    X_clustering = np.column_stack([X_norm * 0.3, Y_norm * 0.3, AGRO_vals * 2.5])
     
     kmeans = KMeans(n_clusters=num_zonas, random_state=42, n_init=15).fit(X_clustering)
     cluster_labels = kmeans.labels_
     
-    # Mapeo por potencial agronómico real (Mayor NDVI -> Zona Alta)
-    cluster_ndvi_means = {c_id: NDVI_vals[cluster_labels == c_id].mean() for c_id in range(num_zonas)}
-    sorted_clusters = sorted(cluster_ndvi_means.keys(), key=lambda x: cluster_ndvi_means[x], reverse=True)
+    # -------------------------------------------------------------------------
+    # ORDENAMIENTO AGRONÓMICO REVISADO: MAYOR VALOR = ALTA PRODUCTIVIDAD
+    # -------------------------------------------------------------------------
+    cluster_agro_means = {c_id: AGRO_vals[cluster_labels == c_id].mean() for c_id in range(num_zonas)}
+    # Ordenar de MAYOR a MENOR vigor vegetal
+    sorted_clusters = sorted(cluster_agro_means.keys(), key=lambda x: cluster_agro_means[x], reverse=True)
     
     if num_zonas == 3:
-        nombres_asignados = {sorted_clusters[0]: "Alta", sorted_clusters[1]: "Media", sorted_clusters[2]: "Baja"}
+        nombres_asignados = {
+            sorted_clusters[0]: "Alta",   # El cluster con MAYOR NDVI/cobertura
+            sorted_clusters[1]: "Media",  # Cluster intermedio
+            sorted_clusters[2]: "Baja"    # El cluster con MENOR NDVI/cobertura
+        }
     else:
         nombres_asignados = {cluster_id: f"Zona {idx+1}" for idx, cluster_id in enumerate(sorted_clusters)}
     
-    # Agrupar celdas por zona
     zonas_dict = {z_nombre: [] for z_nombre in nombres_asignados.values()}
     for idx, cell in enumerate(grid_cells):
         z_nombre = nombres_asignados[cluster_labels[idx]]
@@ -192,13 +188,11 @@ def generar_zonas_agronomicas_suaves(poly_lote, num_zonas, f_inicio, f_fin, num_
     features_zonas = []
     etiquetas_finales = []
 
-    # Unir celdas y aplicar suavizado morfológico curvo (bordes redondeados)
-    for z_nombre, celdas in zonas_dict.items():
+    for z_nombre in ["Alta", "Media", "Baja"] if num_zonas == 3 else list(zonas_dict.keys()):
+        celdas = zonas_dict.get(z_nombre, [])
         if celdas:
             poligono_bruto = unary_union(celdas)
-            # Recorte al límite exacto del lote original
             poligono_recortado = poligono_bruto.intersection(poly_lote)
-            # Aplicación de bordes redondeados
             poligono_suave = suavizar_poligono(poligono_recortado, buffer_suavizado)
             
             if not poligono_suave.is_empty:
@@ -258,7 +252,7 @@ with tab1:
         f_inicio = st.date_input("Fecha Inicial", value=pd.to_datetime("2026-01-01"))
         f_fin = st.date_input("Fecha Final", value=pd.to_datetime("2026-02-15"))
     with col_index:
-        tipo_capa = st.selectbox("Índice Principal", ["NDVI + EVI + NDWI (Multiespectral Combinado)", "NDVI (Vigor Vegetal)", "EVI (Vigor Mejorado)", "NDWI (Humedad de Suelo/Canopia)"])
+        tipo_capa = st.selectbox("Índice Principal", ["NDVI + EVI (Biomasa & Cobertura Vegetal)", "NDVI (Vigor Vegetal)", "EVI (Vigor Mejorado)"])
     
     st.divider()
     
@@ -325,7 +319,7 @@ with tab1:
     if 'geojson_zonas' in st.session_state:
         st.divider()
         st.markdown("### 🗺️ Previsualización Agronómica por Ambientes (Bordes Redondeados)")
-        st.markdown("**Leyenda de Potencial Productivo:** 🟩 **Alta** | 🟨 **Media** | 🟥 **Baja**")
+        st.markdown("**Leyenda Agronómica:** 🟩 **Alta Productividad** (Mayor Cobertura / NDVI) | 🟨 **Media** | 🟥 **Baja Productividad** (Menor Cobertura)")
         
         geojson_data = st.session_state['geojson_zonas']
         
@@ -392,13 +386,15 @@ with tab2:
         cols_sem = st.columns(min(len(etiquetas), 4))
         for idx, z in enumerate(etiquetas):
             with cols_sem[idx % 4]:
-                dosis_semillas[z] = st.number_input(f"Semillas/ha - {z}", value=int(75000 - (idx * 10000)), step=1000)
+                val_def = 75000 if z == "Alta" else (60000 if z == "Media" else 45000)
+                dosis_semillas[z] = st.number_input(f"Semillas/ha - {z}", value=val_def, step=1000)
 
         st.write("##### 2. Fertilización (Kg / ha)")
         cols_fert = st.columns(min(len(etiquetas), 4))
         for idx, z in enumerate(etiquetas):
             with cols_fert[idx % 4]:
-                dosis_fertilizante[z] = st.number_input(f"Fertilizante kg/ha - {z}", value=float(200 - (idx * 40)), step=10.0)
+                val_fert = 200.0 if z == "Alta" else (150.0 if z == "Media" else 100.0)
+                dosis_fertilizante[z] = st.number_input(f"Fertilizante kg/ha - {z}", value=val_fert, step=10.0)
 
         if st.button("🚜 Generar Archivo de Prescripción Final"):
             with st.spinner("Generando archivo..."):
