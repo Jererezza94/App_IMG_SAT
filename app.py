@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import shapely.geometry
 import json
+import xml.etree.ElementTree as ET
 
 # -----------------------------------------------------------------------------
 # CONFIGURACIÓN DE PÁGINA Y ESTILOS
@@ -30,6 +31,25 @@ st.markdown("""
     div[data-testid="stMetricValue"] { font-size: 1.8rem; color: #2e7d32; }
     </style>
 """, unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# FUNCIONES AUXILIARES PARA LECTURA DE ARCHIVOS
+# -----------------------------------------------------------------------------
+def parse_kml(file_bytes):
+    """Extrae coordenadas de un archivo KML simple"""
+    root = ET.fromstring(file_bytes)
+    coords = []
+    # Buscar etiquetas de coordenadas en KML
+    for elem in root.iter():
+        if elem.tag.endswith('coordinates'):
+            raw_text = elem.text.strip()
+            for token in raw_text.split():
+                parts = token.split(',')
+                if len(parts) >= 2:
+                    lon, lat = float(parts[0]), float(parts[1])
+                    coords.append((lon, lat))
+            break
+    return coords
 
 # -----------------------------------------------------------------------------
 # BARRA LATERAL
@@ -77,19 +97,28 @@ with tab1:
         if st.button("🚀 Procesar Imagen Satelital y Mostrar Mapa"):
             with st.spinner("Procesando NDVI y creando zonas de manejo..."):
                 try:
-                    data = json.load(uploaded_file)
+                    uploaded_file.seek(0)
+                    file_bytes = uploaded_file.read()
+                    filename = uploaded_file.name.lower()
                     coords = []
-                    
-                    if "features" in data:
-                        geom = data["features"][0]["geometry"]
+
+                    if filename.endswith(".kml"):
+                        coords = parse_kml(file_bytes)
                     else:
-                        geom = data.get("geometry", data)
-                        
-                    if geom["type"] == "Polygon":
-                        coords = geom["coordinates"][0]
-                    elif geom["type"] == "MultiPolygon":
-                        coords = geom["coordinates"][0][0]
-                        
+                        data = json.loads(file_bytes.decode("utf-8"))
+                        if "features" in data:
+                            geom = data["features"][0]["geometry"]
+                        else:
+                            geom = data.get("geometry", data)
+                            
+                        if geom["type"] == "Polygon":
+                            coords = geom["coordinates"][0]
+                        elif geom["type"] == "MultiPolygon":
+                            coords = geom["coordinates"][0][0]
+
+                    if not coords:
+                        raise ValueError("No se encontraron coordenadas válidas en el archivo.")
+
                     poly_lote = shapely.geometry.Polygon(coords)
                     xmin, ymin, xmax, ymax = poly_lote.bounds
                     
@@ -127,7 +156,7 @@ with tab1:
                     st.session_state['etiquetas_zonas'] = etiquetas_zonas
                     st.success("Zonificación realizada con éxito.")
                 except Exception as e:
-                    st.error(f"Error procesando el archivo: {e}. Asegúrate de usar un archivo .geojson válido.")
+                    st.error(f"Error procesando el archivo: {e}. Verifica que el archivo KML/GeoJSON no esté corrupto.")
 
     if 'geojson_zonas' in st.session_state:
         st.divider()
