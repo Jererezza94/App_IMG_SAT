@@ -5,6 +5,14 @@ import shapely.geometry
 import json
 import xml.etree.ElementTree as ET
 
+# Intentar importar librerías de mapeo avanzado
+try:
+    import folium
+    from streamlit_folium import st_folium
+    HAS_FOLIUM = True
+except ImportError:
+    HAS_FOLIUM = False
+
 # -----------------------------------------------------------------------------
 # CONFIGURACIÓN DE PÁGINA Y ESTILOS
 # -----------------------------------------------------------------------------
@@ -49,7 +57,6 @@ def parse_kml(file_bytes):
     return coords
 
 def limpiar_mapa_rendimiento(df):
-    """Filtra outliers extremos de velocidad y rinde."""
     col_yield = next((c for c in df.columns if 'yield' in c.lower() or 'rinde' in c.lower() or 'tn/ha' in c.lower() or 'kg/ha' in c.lower()), None)
     
     if col_yield:
@@ -62,6 +69,17 @@ def limpiar_mapa_rendimiento(df):
         df = df[df[col_speed] > 0.5]
         
     return df, col_yield
+
+def obtener_color_zona(nombre_zona):
+    nombre = str(nombre_zona).lower()
+    if "alta" in nombre or "zona 1" in nombre:
+        return "#2ea043"  # Verde
+    elif "media" in nombre or "zona 2" in nombre:
+        return "#f1e05a"  # Amarillo
+    elif "baja" in nombre or "zona 3" in nombre:
+        return "#da3633"  # Rojo
+    else:
+        return "#8b949e"  # Gris
 
 # -----------------------------------------------------------------------------
 # BARRA LATERAL
@@ -76,7 +94,7 @@ with st.sidebar:
     num_zonas = st.slider("Cantidad de Zonas de Manejo", min_value=2, max_value=10, value=3)
     
     st.divider()
-    st.info("💡 **Flujo de trabajo:**\n1. Seleccionar fechas e índice satelital\n2. Cargar Lote o Rinde\n3. Exportar/Importar con QGIS\n4. Generar Prescripción")
+    st.info("💡 **Flujo de trabajo:**\n1. Seleccionar fechas e índice\n2. Cargar Lote o Rinde\n3. Exportar Vectorial para QGIS\n4. Cargar QGIS editado y generar Prescripción")
 
 # -----------------------------------------------------------------------------
 # CUERPO PRINCIPAL
@@ -89,12 +107,11 @@ tab1, tab2 = st.tabs([
 ])
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 1: SELECCIÓN DE IMÁGENES, CARGA Y ZONIFICACIÓN
+# PESTAÑA 1
 # -----------------------------------------------------------------------------
 with tab1:
     st.markdown("### Paso 1: Configurar Parámetros Satelitales y Cargar Datos")
     
-    # Restaurada la sección de fechas e índices satelitales
     col_dates, col_index = st.columns([1, 1])
     with col_dates:
         f_inicio = st.date_input("Fecha Inicial", value=pd.to_datetime("2026-01-01"))
@@ -112,7 +129,7 @@ with tab1:
         
     st.divider()
     st.markdown("#### ✏️ Edición Externa (QGIS)")
-    uploaded_edited = st.file_uploader("Re-cargar Zonas Modificadas desde QGIS (.GeoJSON)", type=["geojson", "json"], key="qgis_uploader")
+    uploaded_edited = st.file_uploader("Re-cargar Zonas Vectoriales Modificadas desde QGIS (.GeoJSON)", type=["geojson", "json"], key="qgis_uploader")
 
     if uploaded_edited:
         try:
@@ -120,7 +137,7 @@ with tab1:
             st.session_state['geojson_zonas'] = geojson_editado
             zonas_detectadas = sorted(list(set([f['properties'].get('zona', 'Zona 1') for f in geojson_editado['features']])))
             st.session_state['etiquetas_zonas'] = zonas_detectadas
-            st.success("✅ ¡Zonas cargadas con éxito desde QGIS!")
+            st.success("✅ ¡Capa vectorial cargada con éxito desde QGIS!")
         except Exception as e:
             st.error(f"Error al leer el archivo de QGIS: {e}")
 
@@ -150,7 +167,7 @@ with tab1:
                         poly_lote = shapely.geometry.Polygon(coords)
 
                     xmin, ymin, xmax, ymax = poly_lote.bounds
-                    rows, cols = 8, 8
+                    rows, cols = 15, 15
                     x_coords = np.linspace(xmin, xmax, cols + 1)
                     y_coords = np.linspace(ymin, ymax, rows + 1)
                     
@@ -176,46 +193,55 @@ with tab1:
                     
                     st.session_state['geojson_zonas'] = {"type": "FeatureCollection", "features": features_zonas}
                     st.session_state['etiquetas_zonas'] = etiquetas_zonas
-                    st.success(f"Zonificación realizada con éxito usando {tipo_capa}.")
+                    st.success(f"Zonificación continua realizada con éxito usando {tipo_capa}.")
                 except Exception as e:
                     st.error(f"Error procesando el archivo: {e}")
 
     # -------------------------------------------------------------------------
-    # CORRECCIÓN DE PREVISUALIZACIÓN DE MAPA (SIN MANCHA ROJA COMPLETA)
+    # PREVISUALIZACIÓN POLIGONAL COMPLETA EN VERDE, AMARILLO Y ROJO
     # -------------------------------------------------------------------------
     if 'geojson_zonas' in st.session_state:
         st.divider()
-        st.markdown(f"### 🗺️ Previsualización de Zonas ({tipo_capa if 'tipo_capa' in locals() else 'Satelital'})")
+        st.markdown("### 🗺️ Previsualización del Lote Completo por Zonas")
+        st.markdown("**Leyenda de Producción:** 🟩 **Alta** | 🟨 **Media** | 🟥 **Baja**")
         
-        puntos_mapa = []
-        for feat in st.session_state['geojson_zonas']['features']:
-            geom = shapely.geometry.shape(feat['geometry'])
-            c = geom.centroid
-            puntos_mapa.append({
-                'Latitud': c.y, 
-                'Longitud': c.x, 
-                'Zona': feat['properties']['zona']
-            })
+        geojson_data = st.session_state['geojson_zonas']
+        
+        if HAS_FOLIUM:
+            lats, lons = [], []
+            for feat in geojson_data['features']:
+                geom = shapely.geometry.shape(feat['geometry'])
+                lats.append(geom.centroid.y)
+                lons.append(geom.centroid.x)
             
-        df_map = pd.DataFrame(puntos_mapa)
-        
-        # Muestra centroides limpios en el mapa
-        st.map(df_map, latitude='Latitud', longitude='Longitud', zoom=13)
-        
-        # Detalle estructurado de zonas
-        with st.expander("📊 Ver distribución de puntos por zona"):
-            st.dataframe(df_map['Zona'].value_counts().reset_index().rename(columns={'index': 'Zona', 'Zona': 'Cantidad de Mallas'}), use_container_width=True)
+            mapa_centro = [np.mean(lats), np.mean(lons)]
+            m = folium.Map(location=mapa_centro, zoom_start=14, tiles="OpenStreetMap")
+            
+            folium.GeoJson(
+                geojson_data,
+                style_function=lambda feature: {
+                    'fillColor': obtener_color_zona(feature['properties'].get('zona', '')),
+                    'color': '#333333',
+                    'weight': 0.8,
+                    'fillOpacity': 0.75
+                },
+                tooltip=folium.GeoJsonTooltip(fields=['zona'], aliases=['Zona de Manejo:'])
+            ).add_to(m)
+            
+            st_folium(m, width=1100, height=500)
+        else:
+            st.warning("⚠️ El servidor aún está instalando 'folium'. Por favor hacé click en el menú de la app arriba a la derecha y selecciona 'Reboot app'.")
 
-        st.markdown("#### 📥 Exportar para QGIS")
+        st.markdown("#### 📥 Exportar Capa Vectorial de Polígonos para QGIS")
         st.download_button(
-            label="🌍 Descargar Zonas (.GeoJSON) para editar en QGIS",
-            data=json.dumps(st.session_state['geojson_zonas'], indent=2),
-            file_name="Zonas_para_QGIS.geojson",
+            label="🌍 Descargar Zonas Vectoriales (.GeoJSON) para QGIS",
+            data=json.dumps(geojson_data, indent=2),
+            file_name="Zonas_Vectoriales_QGIS.geojson",
             mime="application/json"
         )
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 2: ASIGNAR DOSIS Y EXPORTAR
+# PESTAÑA 2
 # -----------------------------------------------------------------------------
 with tab2:
     st.markdown("### Paso 2: Definir Dosis y Exportar Prescripción Final")
