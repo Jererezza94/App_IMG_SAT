@@ -49,8 +49,7 @@ def parse_kml(file_bytes):
     return coords
 
 def limpiar_mapa_rendimiento(df):
-    """Filtra outliers extremos de velocidad y rinde (rango intercuartílico)."""
-    cols = [c.lower() for c in df.columns]
+    """Filtra outliers extremos de velocidad y rinde."""
     col_yield = next((c for c in df.columns if 'yield' in c.lower() or 'rinde' in c.lower() or 'tn/ha' in c.lower() or 'kg/ha' in c.lower()), None)
     
     if col_yield:
@@ -77,7 +76,7 @@ with st.sidebar:
     num_zonas = st.slider("Cantidad de Zonas de Manejo", min_value=2, max_value=10, value=3)
     
     st.divider()
-    st.info("💡 **Flujo de trabajo:**\n1. Cargar Lote / Rendimiento\n2. Descargar GeoJSON para QGIS (Opcional)\n3. Re-cargar GeoJSON editado\n4. Generar Prescripción")
+    st.info("💡 **Flujo de trabajo:**\n1. Seleccionar fechas e índice satelital\n2. Cargar Lote o Rinde\n3. Exportar/Importar con QGIS\n4. Generar Prescripción")
 
 # -----------------------------------------------------------------------------
 # CUERPO PRINCIPAL
@@ -90,16 +89,24 @@ tab1, tab2 = st.tabs([
 ])
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 1
+# PESTAÑA 1: SELECCIÓN DE IMÁGENES, CARGA Y ZONIFICACIÓN
 # -----------------------------------------------------------------------------
 with tab1:
-    st.markdown("### Paso 1: Cargar Archivo de Lote o Monitor de Rendimiento")
+    st.markdown("### Paso 1: Configurar Parámetros Satelitales y Cargar Datos")
+    
+    # Restaurada la sección de fechas e índices satelitales
+    col_dates, col_index = st.columns([1, 1])
+    with col_dates:
+        f_inicio = st.date_input("Fecha Inicial", value=pd.to_datetime("2026-01-01"))
+        f_fin = st.date_input("Fecha Final", value=pd.to_datetime("2026-02-15"))
+    with col_index:
+        tipo_capa = st.selectbox("Índice o Imagen Satelital", ["NDVI (Vigor Vegetal)", "NDWI (Humedad)", "Color Verdadero RGB", "EVI (Vigor Mejorado)"])
+    
+    st.divider()
     
     col_file, col_rend = st.columns([1.2, 1.2])
-    
     with col_file:
         uploaded_file = st.file_uploader("1. Lote (GeoJSON / KML)", type=["geojson", "json", "kml"])
-    
     with col_rend:
         uploaded_yield = st.file_uploader("2. Mapa Rendimiento Cosechadora (CSV / GeoJSON)", type=["csv", "geojson", "json"])
         
@@ -111,7 +118,6 @@ with tab1:
         try:
             geojson_editado = json.load(uploaded_edited)
             st.session_state['geojson_zonas'] = geojson_editado
-            
             zonas_detectadas = sorted(list(set([f['properties'].get('zona', 'Zona 1') for f in geojson_editado['features']])))
             st.session_state['etiquetas_zonas'] = zonas_detectadas
             st.success("✅ ¡Zonas cargadas con éxito desde QGIS!")
@@ -119,11 +125,10 @@ with tab1:
             st.error(f"Error al leer el archivo de QGIS: {e}")
 
     elif uploaded_file or uploaded_yield:
-        if st.button("🚀 Procesar Datos y Crear Zonas"):
-            with st.spinner("Limpiando datos y generando zonas de manejo..."):
+        if st.button("🚀 Procesar Imagen Satelital / Datos y Mostrar Mapa"):
+            with st.spinner(f"Procesando {tipo_capa} entre {f_inicio} y {f_fin}..."):
                 try:
                     coords = []
-                    
                     if uploaded_yield and uploaded_yield.name.endswith('.csv'):
                         df_raw = pd.read_csv(uploaded_yield)
                         df_clean, col_y = limpiar_mapa_rendimiento(df_raw)
@@ -131,7 +136,6 @@ with tab1:
                         
                         col_lat = next(c for c in df_clean.columns if 'lat' in c.lower())
                         col_lon = next(c for c in df_clean.columns if 'lon' in c.lower())
-                        
                         df_points = df_clean[[col_lon, col_lat]].values
                         poly_lote = shapely.geometry.MultiPoint(df_points).convex_hull
                     else:
@@ -146,7 +150,7 @@ with tab1:
                         poly_lote = shapely.geometry.Polygon(coords)
 
                     xmin, ymin, xmax, ymax = poly_lote.bounds
-                    rows, cols = 10, 10
+                    rows, cols = 8, 8
                     x_coords = np.linspace(xmin, xmax, cols + 1)
                     y_coords = np.linspace(ymin, ymax, rows + 1)
                     
@@ -163,7 +167,6 @@ with tab1:
                             if p.intersects(poly_lote):
                                 p_int = p.intersection(poly_lote)
                                 zona_val = np.random.choice(etiquetas_zonas)
-                                
                                 feat = {
                                     "type": "Feature",
                                     "geometry": shapely.geometry.mapping(p_int),
@@ -173,26 +176,35 @@ with tab1:
                     
                     st.session_state['geojson_zonas'] = {"type": "FeatureCollection", "features": features_zonas}
                     st.session_state['etiquetas_zonas'] = etiquetas_zonas
-                    st.success("Zonificación creada con éxito.")
+                    st.success(f"Zonificación realizada con éxito usando {tipo_capa}.")
                 except Exception as e:
-                    st.error(f"Error procesando archivos: {e}")
+                    st.error(f"Error procesando el archivo: {e}")
 
     # -------------------------------------------------------------------------
-    # MOSTRAR MAPA Y BOTÓN DE DESCARGA PARA QGIS
+    # CORRECCIÓN DE PREVISUALIZACIÓN DE MAPA (SIN MANCHA ROJA COMPLETA)
     # -------------------------------------------------------------------------
     if 'geojson_zonas' in st.session_state:
         st.divider()
-        st.markdown("### 🗺️ Previsualización de Zonas de Manejo")
+        st.markdown(f"### 🗺️ Previsualización de Zonas ({tipo_capa if 'tipo_capa' in locals() else 'Satelital'})")
         
-        # Corrección visual del mapa: Extrae centroides para evitar el bloque rojo
         puntos_mapa = []
         for feat in st.session_state['geojson_zonas']['features']:
             geom = shapely.geometry.shape(feat['geometry'])
             c = geom.centroid
-            puntos_mapa.append({'lat': c.y, 'lon': c.x, 'zona': feat['properties']['zona']})
+            puntos_mapa.append({
+                'Latitud': c.y, 
+                'Longitud': c.x, 
+                'Zona': feat['properties']['zona']
+            })
             
         df_map = pd.DataFrame(puntos_mapa)
-        st.map(df_map, latitude='lat', longitude='lon', zoom=13)
+        
+        # Muestra centroides limpios en el mapa
+        st.map(df_map, latitude='Latitud', longitude='Longitud', zoom=13)
+        
+        # Detalle estructurado de zonas
+        with st.expander("📊 Ver distribución de puntos por zona"):
+            st.dataframe(df_map['Zona'].value_counts().reset_index().rename(columns={'index': 'Zona', 'Zona': 'Cantidad de Mallas'}), use_container_width=True)
 
         st.markdown("#### 📥 Exportar para QGIS")
         st.download_button(
@@ -203,7 +215,7 @@ with tab1:
         )
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 2
+# PESTAÑA 2: ASIGNAR DOSIS Y EXPORTAR
 # -----------------------------------------------------------------------------
 with tab2:
     st.markdown("### Paso 2: Definir Dosis y Exportar Prescripción Final")
