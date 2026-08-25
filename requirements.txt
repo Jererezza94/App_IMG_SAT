@@ -1,5 +1,8 @@
+Plaintext
 streamlit
 geopandas
 pandas
 numpy
 shapely
+folium
+streamlit-folium
