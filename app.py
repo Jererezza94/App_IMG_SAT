@@ -33,23 +33,36 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# FUNCIONES AUXILIARES PARA LECTURA DE ARCHIVOS
+# FUNCIONES AUXILIARES
 # -----------------------------------------------------------------------------
 def parse_kml(file_bytes):
-    """Extrae coordenadas de un archivo KML simple"""
     root = ET.fromstring(file_bytes)
     coords = []
-    # Buscar etiquetas de coordenadas en KML
     for elem in root.iter():
         if elem.tag.endswith('coordinates'):
             raw_text = elem.text.strip()
             for token in raw_text.split():
                 parts = token.split(',')
                 if len(parts) >= 2:
-                    lon, lat = float(parts[0]), float(parts[1])
-                    coords.append((lon, lat))
+                    coords.append((float(parts[0]), float(parts[1])))
             break
     return coords
+
+def limpiar_mapa_rendimiento(df):
+    """Filtra outliers extremos de velocidad y rinde (rango intercuartílico)."""
+    cols = [c.lower() for c in df.columns]
+    col_yield = next((c for c in df.columns if 'yield' in c.lower() or 'rinde' in c.lower() or 'tn/ha' in c.lower() or 'kg/ha' in c.lower()), None)
+    
+    if col_yield:
+        q1 = df[col_yield].quantile(0.05)
+        q3 = df[col_yield].quantile(0.95)
+        df = df[(df[col_yield] >= q1) & (df[col_yield] <= q3)]
+    
+    col_speed = next((c for c in df.columns if 'speed' in c.lower() or 'vel' in c.lower()), None)
+    if col_speed:
+        df = df[df[col_speed] > 0.5]
+        
+    return df, col_yield
 
 # -----------------------------------------------------------------------------
 # BARRA LATERAL
@@ -64,7 +77,7 @@ with st.sidebar:
     num_zonas = st.slider("Cantidad de Zonas de Manejo", min_value=2, max_value=10, value=3)
     
     st.divider()
-    st.info("💡 **Flujo de trabajo:**\n1. Sube tu GeoJSON/KML\n2. Previsualiza zonas\n3. Asigna Semillas/ha y Fertilizante (kg/ha)\n4. Genera archivo para tu monitor.")
+    st.info("💡 **Flujo de trabajo:**\n1. Cargar Lote / Rendimiento\n2. Descargar GeoJSON para QGIS (Opcional)\n3. Re-cargar GeoJSON editado\n4. Generar Prescripción")
 
 # -----------------------------------------------------------------------------
 # CUERPO PRINCIPAL
@@ -72,57 +85,68 @@ with st.sidebar:
 st.title("🌱 Generador de Prescripciones Agrícolas")
 
 tab1, tab2 = st.tabs([
-    "🛰️ 1. Cargar Lote & Previsualizar Zonas", 
+    "🛰️ 1. Cargar Lote / Rendimiento & Zonificar", 
     "🚜 2. Prescripción Final (Semillas + Fertilizante)"
 ])
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 1: CARGAR LOTE Y ZONIFICAR
+# PESTAÑA 1
 # -----------------------------------------------------------------------------
 with tab1:
-    st.markdown("### Paso 1: Cargar Lote y Procesar Zonas")
+    st.markdown("### Paso 1: Cargar Archivo de Lote o Monitor de Rendimiento")
     
-    col_file, col_dates = st.columns([1.5, 1])
+    col_file, col_rend = st.columns([1.2, 1.2])
     
     with col_file:
-        uploaded_file = st.file_uploader("Cargar lote (GeoJSON / KML / JSON)", type=["geojson", "json", "kml"])
+        uploaded_file = st.file_uploader("1. Lote (GeoJSON / KML)", type=["geojson", "json", "kml"])
     
-    with col_dates:
-        f_inicio = st.date_input("Fecha Inicial", value=pd.to_datetime("2026-01-01"))
-        f_fin = st.date_input("Fecha Final", value=pd.to_datetime("2026-02-15"))
-        tipo_capa = st.selectbox("Índice o Imagen", ["NDVI (Vigor Vegetal)", "NDWI (Humedad)", "Color Verdadero RGB"])
+    with col_rend:
+        uploaded_yield = st.file_uploader("2. Mapa Rendimiento Cosechadora (CSV / GeoJSON)", type=["csv", "geojson", "json"])
+        
+    st.divider()
+    st.markdown("#### ✏️ Edición Externa (QGIS)")
+    uploaded_edited = st.file_uploader("Re-cargar Zonas Modificadas desde QGIS (.GeoJSON)", type=["geojson", "json"], key="qgis_uploader")
 
-    if uploaded_file:
-        st.success("✅ ARCHIVO CARGADO CORRECTAMENTE")
-        if st.button("🚀 Procesar Imagen Satelital y Mostrar Mapa"):
-            with st.spinner("Procesando NDVI y creando zonas de manejo..."):
+    if uploaded_edited:
+        try:
+            geojson_editado = json.load(uploaded_edited)
+            st.session_state['geojson_zonas'] = geojson_editado
+            
+            zonas_detectadas = sorted(list(set([f['properties'].get('zona', 'Zona 1') for f in geojson_editado['features']])))
+            st.session_state['etiquetas_zonas'] = zonas_detectadas
+            st.success("✅ ¡Zonas cargadas con éxito desde QGIS!")
+        except Exception as e:
+            st.error(f"Error al leer el archivo de QGIS: {e}")
+
+    elif uploaded_file or uploaded_yield:
+        if st.button("🚀 Procesar Datos y Crear Zonas"):
+            with st.spinner("Limpiando datos y generando zonas de manejo..."):
                 try:
-                    uploaded_file.seek(0)
-                    file_bytes = uploaded_file.read()
-                    filename = uploaded_file.name.lower()
                     coords = []
-
-                    if filename.endswith(".kml"):
-                        coords = parse_kml(file_bytes)
-                    else:
-                        data = json.loads(file_bytes.decode("utf-8"))
-                        if "features" in data:
-                            geom = data["features"][0]["geometry"]
-                        else:
-                            geom = data.get("geometry", data)
-                            
-                        if geom["type"] == "Polygon":
-                            coords = geom["coordinates"][0]
-                        elif geom["type"] == "MultiPolygon":
-                            coords = geom["coordinates"][0][0]
-
-                    if not coords:
-                        raise ValueError("No se encontraron coordenadas válidas en el archivo.")
-
-                    poly_lote = shapely.geometry.Polygon(coords)
-                    xmin, ymin, xmax, ymax = poly_lote.bounds
                     
-                    rows, cols = 12, 12
+                    if uploaded_yield and uploaded_yield.name.endswith('.csv'):
+                        df_raw = pd.read_csv(uploaded_yield)
+                        df_clean, col_y = limpiar_mapa_rendimiento(df_raw)
+                        st.info(f"✨ Mapa de rinde filtrado correctamente ({len(df_clean)} puntos válidos).")
+                        
+                        col_lat = next(c for c in df_clean.columns if 'lat' in c.lower())
+                        col_lon = next(c for c in df_clean.columns if 'lon' in c.lower())
+                        
+                        df_points = df_clean[[col_lon, col_lat]].values
+                        poly_lote = shapely.geometry.MultiPoint(df_points).convex_hull
+                    else:
+                        uploaded_file.seek(0)
+                        file_bytes = uploaded_file.read()
+                        if uploaded_file.name.lower().endswith(".kml"):
+                            coords = parse_kml(file_bytes)
+                        else:
+                            data = json.loads(file_bytes.decode("utf-8"))
+                            geom = data["features"][0]["geometry"] if "features" in data else data.get("geometry", data)
+                            coords = geom["coordinates"][0] if geom["type"] == "Polygon" else geom["coordinates"][0][0]
+                        poly_lote = shapely.geometry.Polygon(coords)
+
+                    xmin, ymin, xmax, ymax = poly_lote.bounds
+                    rows, cols = 10, 10
                     x_coords = np.linspace(xmin, xmax, cols + 1)
                     y_coords = np.linspace(ymin, ymax, rows + 1)
                     
@@ -147,36 +171,42 @@ with tab1:
                                 }
                                 features_zonas.append(feat)
                     
-                    geojson_zonas = {
-                        "type": "FeatureCollection",
-                        "features": features_zonas
-                    }
-                    
-                    st.session_state['geojson_zonas'] = geojson_zonas
+                    st.session_state['geojson_zonas'] = {"type": "FeatureCollection", "features": features_zonas}
                     st.session_state['etiquetas_zonas'] = etiquetas_zonas
-                    st.success("Zonificación realizada con éxito.")
+                    st.success("Zonificación creada con éxito.")
                 except Exception as e:
-                    st.error(f"Error procesando el archivo: {e}. Verifica que el archivo KML/GeoJSON no esté corrupto.")
+                    st.error(f"Error procesando archivos: {e}")
 
+    # -------------------------------------------------------------------------
+    # MOSTRAR MAPA Y BOTÓN DE DESCARGA PARA QGIS
+    # -------------------------------------------------------------------------
     if 'geojson_zonas' in st.session_state:
         st.divider()
-        st.markdown("### 🗺️ Previsualización del Mapa de Zonas")
+        st.markdown("### 🗺️ Previsualización de Zonas de Manejo")
         
-        df_coords = []
+        # Corrección visual del mapa: Extrae centroides para evitar el bloque rojo
+        puntos_mapa = []
         for feat in st.session_state['geojson_zonas']['features']:
-            geom = feat['geometry']
-            if geom['type'] == 'Polygon':
-                c = geom['coordinates'][0][0]
-                df_coords.append({'lat': c[1], 'lon': c[0]})
-                
-        if df_coords:
-            st.map(pd.DataFrame(df_coords))
+            geom = shapely.geometry.shape(feat['geometry'])
+            c = geom.centroid
+            puntos_mapa.append({'lat': c.y, 'lon': c.x, 'zona': feat['properties']['zona']})
+            
+        df_map = pd.DataFrame(puntos_mapa)
+        st.map(df_map, latitude='lat', longitude='lon', zoom=13)
+
+        st.markdown("#### 📥 Exportar para QGIS")
+        st.download_button(
+            label="🌍 Descargar Zonas (.GeoJSON) para editar en QGIS",
+            data=json.dumps(st.session_state['geojson_zonas'], indent=2),
+            file_name="Zonas_para_QGIS.geojson",
+            mime="application/json"
+        )
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 2: ASIGNAR DOSIS Y DESCARGAR
+# PESTAÑA 2
 # -----------------------------------------------------------------------------
 with tab2:
-    st.markdown("### Paso 2: Definir Dosis y Exportar Prescripción")
+    st.markdown("### Paso 2: Definir Dosis y Exportar Prescripción Final")
     
     if 'geojson_zonas' in st.session_state:
         brand_monitor = st.selectbox(
@@ -209,12 +239,12 @@ with tab2:
             with cols_fert[idx % 4]:
                 dosis_fertilizante[z] = st.number_input(f"Fertilizante kg/ha - {z}", value=float(200 - (idx * 40)), step=10.0)
 
-        if st.button("🚜 Generar Archivo de Prescripción"):
+        if st.button("🚜 Generar Archivo de Prescripción Final"):
             with st.spinner("Generando archivo..."):
                 final_geojson = json.loads(json.dumps(st.session_state['geojson_zonas']))
                 
                 for feat in final_geojson['features']:
-                    z_val = feat['properties']['zona']
+                    z_val = feat['properties'].get('zona', 'Zona 1')
                     sem = dosis_semillas.get(z_val, 60000)
                     fert = dosis_fertilizante.get(z_val, 150.0)
                     
@@ -234,14 +264,12 @@ with tab2:
                         feat['properties']['DOSE_RATE'] = sem
                         feat['properties']['DOSE_FERT'] = fert
 
-                json_str = json.dumps(final_geojson, indent=2)
-                
                 st.success("✅ Prescripción lista para descargar.")
                 st.download_button(
                     label="💾 DESCARGAR PRESCRIPCIÓN (.GeoJSON)",
-                    data=json_str,
+                    data=json.dumps(final_geojson, indent=2),
                     file_name="Prescripcion_Monitor.geojson",
                     mime="application/json"
                 )
     else:
-        st.warning("⚠️ Primero debes cargar y procesar tu lote en la Pestaña 1.")
+        st.warning("⚠️ Primero debes cargar o procesar datos en la Pestaña 1.")
