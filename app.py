@@ -17,7 +17,7 @@ def init_earth_engine(project_id=None):
         if project_id:
             ee.Initialize(project=project_id)
         else:
-            ee.Initialize()
+            ee.Initialize(project='chrome-unity-461114-f5')
         return True
     except Exception as e:
         return str(e)
