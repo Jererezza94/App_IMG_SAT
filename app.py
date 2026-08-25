@@ -5,9 +5,14 @@ import shapely.geometry
 from shapely.ops import unary_union
 import json
 import xml.etree.ElementTree as ET
-from sklearn.cluster import KMeans
 
-# Intentar importar folium para el mapa interactivo
+# Manejo seguro de dependencias externas
+try:
+    from sklearn.cluster import KMeans
+    HAS_SKLEARN = True
+except ImportError:
+    HAS_SKLEARN = False
+
 try:
     import folium
     from streamlit_folium import st_folium
@@ -43,7 +48,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# FUNCIONES AUXILIARES DE PROCESAMIENTO
+# FUNCIONES AUXILIARES
 # -----------------------------------------------------------------------------
 def parse_kml(file_bytes):
     root = ET.fromstring(file_bytes)
@@ -83,9 +88,8 @@ def obtener_color_zona(nombre_zona):
         return "#8b949e"  # Gris
 
 def generar_zonas_unidas(poly_lote, num_zonas):
-    """Genera polígonos continuos (manchas unidas) agrupando micro-celdas mediante K-Means."""
     xmin, ymin, xmax, ymax = poly_lote.bounds
-    rows, cols = 40, 40  # Malla fina para unión suave
+    rows, cols = 35, 35
     x_coords = np.linspace(xmin, xmax, cols + 1)
     y_coords = np.linspace(ymin, ymax, rows + 1)
     
@@ -103,11 +107,9 @@ def generar_zonas_unidas(poly_lote, num_zonas):
 
     centroids = np.array(centroids)
     
-    # Clustering K-Means para agrupar celdas vecinas en manchas continuas
     kmeans = KMeans(n_clusters=num_zonas, random_state=42, n_init=10).fit(centroids)
     labels = kmeans.labels_
 
-    # Agrupar las etiquetas a los nombres correspondientes
     etiquetas_mapeo = {0: "Alta", 1: "Media", 2: "Baja"} if num_zonas == 3 else {i: f"Zona {i+1}" for i in range(num_zonas)}
     
     zonas_dict = {z: [] for z in set(labels)}
@@ -117,7 +119,6 @@ def generar_zonas_unidas(poly_lote, num_zonas):
     features_zonas = []
     etiquetas_finales = []
 
-    # Unir geométricamente todas las celdas de una misma zona en un solo polígono
     for cluster_id, celdas in zonas_dict.items():
         poligono_unido = unary_union(celdas)
         nombre_z = etiquetas_mapeo.get(cluster_id, f"Zona {cluster_id+1}")
@@ -143,14 +144,14 @@ with st.sidebar:
     
     st.subheader("⚙️ Configuración Global")
     num_zonas = st.slider("Cantidad de Zonas de Manejo", min_value=2, max_value=5, value=3)
-    
-    st.divider()
-    st.info("💡 **Flujo de trabajo:**\n1. Configurar parámetros satelitales\n2. Cargar lote o mapa de rinde\n3. Exportar/Importar con QGIS\n4. Asignar dosis y descargar prescripción")
 
 # -----------------------------------------------------------------------------
 # CUERPO PRINCIPAL
 # -----------------------------------------------------------------------------
 st.title("🌱 Generador de Prescripciones Agrícolas")
+
+if not HAS_SKLEARN or not HAS_FOLIUM:
+    st.error("⚠️ Falta instalar librerías en el servidor. Asegurate de que `requirements.txt` tenga `scikit-learn` y `folium`, y luego hacé 'Reboot app'.")
 
 tab1, tab2 = st.tabs([
     "🛰️ 1. Cargar Lote / Rendimiento & Zonificar", 
@@ -194,44 +195,46 @@ with tab1:
 
     elif uploaded_file or uploaded_yield:
         if st.button("🚀 Procesar Imagen Satelital / Datos y Crear Zonas Unidas"):
-            with st.spinner(f"Creando zonas de manejo continuas con {tipo_capa}..."):
-                try:
-                    if uploaded_yield and uploaded_yield.name.endswith('.csv'):
-                        df_raw = pd.read_csv(uploaded_yield)
-                        df_clean, col_y = limpiar_mapa_rendimiento(df_raw)
-                        st.info(f"✨ Mapa de rinde filtrado correctamente ({len(df_clean)} puntos válidos).")
-                        
-                        col_lat = next(c for c in df_clean.columns if 'lat' in c.lower())
-                        col_lon = next(c for c in df_clean.columns if 'lon' in c.lower())
-                        df_points = df_clean[[col_lon, col_lat]].values
-                        poly_lote = shapely.geometry.MultiPoint(df_points).convex_hull
-                    else:
-                        uploaded_file.seek(0)
-                        file_bytes = uploaded_file.read()
-                        if uploaded_file.name.lower().endswith(".kml"):
-                            coords = parse_kml(file_bytes)
+            if not HAS_SKLEARN:
+                st.error("Error: 'scikit-learn' no está disponible todavía en el servidor.")
+            else:
+                with st.spinner(f"Creando zonas de manejo continuas con {tipo_capa}..."):
+                    try:
+                        if uploaded_yield and uploaded_yield.name.endswith('.csv'):
+                            df_raw = pd.read_csv(uploaded_yield)
+                            df_clean, col_y = limpiar_mapa_rendimiento(df_raw)
+                            st.info(f"✨ Mapa de rinde filtrado correctamente ({len(df_clean)} puntos válidos).")
+                            
+                            col_lat = next(c for c in df_clean.columns if 'lat' in c.lower())
+                            col_lon = next(c for c in df_clean.columns if 'lon' in c.lower())
+                            df_points = df_clean[[col_lon, col_lat]].values
+                            poly_lote = shapely.geometry.MultiPoint(df_points).convex_hull
                         else:
-                            data = json.loads(file_bytes.decode("utf-8"))
-                            geom = data["features"][0]["geometry"] if "features" in data else data.get("geometry", data)
-                            coords = geom["coordinates"][0] if geom["type"] == "Polygon" else geom["coordinates"][0][0]
-                        poly_lote = shapely.geometry.Polygon(coords)
+                            uploaded_file.seek(0)
+                            file_bytes = uploaded_file.read()
+                            if uploaded_file.name.lower().endswith(".kml"):
+                                coords = parse_kml(file_bytes)
+                            else:
+                                data = json.loads(file_bytes.decode("utf-8"))
+                                geom = data["features"][0]["geometry"] if "features" in data else data.get("geometry", data)
+                                coords = geom["coordinates"][0] if geom["type"] == "Polygon" else geom["coordinates"][0][0]
+                            poly_lote = shapely.geometry.Polygon(coords)
 
-                    # Generar las manchas continuas
-                    geojson_zonas, etiquetas_zonas = generar_zonas_unidas(poly_lote, num_zonas)
-                    
-                    st.session_state['geojson_zonas'] = geojson_zonas
-                    st.session_state['etiquetas_zonas'] = etiquetas_zonas
-                    st.success(f"Zonificación por manchas completada con éxito.")
-                except Exception as e:
-                    st.error(f"Error procesando el archivo: {e}")
+                        geojson_zonas, etiquetas_zonas = generar_zonas_unidas(poly_lote, num_zonas)
+                        
+                        st.session_state['geojson_zonas'] = geojson_zonas
+                        st.session_state['etiquetas_zonas'] = etiquetas_zonas
+                        st.success("Zonificación por manchas completada con éxito.")
+                    except Exception as e:
+                        st.error(f"Error procesando el archivo: {e}")
 
     # -------------------------------------------------------------------------
-    # VISUALIZACIÓN EN MANCHAS VERDE / AMARILLO / ROJO
+    # VISUALIZACIÓN
     # -------------------------------------------------------------------------
     if 'geojson_zonas' in st.session_state:
         st.divider()
         st.markdown("### 🗺️ Previsualización de Zonas de Manejo (Manchas Unidas)")
-        st.markdown("**Leyenda de Producción:** 🟩 **Alta** | 🟨 **Media** | 🟥 **Baja**")
+        st.markdown("**Leyenda:** 🟩 **Alta** | 🟨 **Media** | 🟥 **Baja**")
         
         geojson_data = st.session_state['geojson_zonas']
         
@@ -257,8 +260,6 @@ with tab1:
             ).add_to(m)
             
             st_folium(m, width=1100, height=500)
-        else:
-            st.warning("⚠️ Recordá instalar 'folium' y 'streamlit-folium' en requirements.txt y hacer 'Reboot app' en Streamlit Cloud.")
 
         st.markdown("#### 📥 Exportar Manchas Vectoriales para QGIS")
         st.download_button(
@@ -269,7 +270,7 @@ with tab1:
         )
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 2: PRESCRIPCIÓN
+# PESTAÑA 2
 # -----------------------------------------------------------------------------
 with tab2:
     st.markdown("### Paso 2: Definir Dosis y Exportar Prescripción Final")
