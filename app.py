@@ -2,10 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import shapely.geometry
-import zipfile
-import io
-import os
-import shutil
 import json
 
 # -----------------------------------------------------------------------------
@@ -61,7 +57,7 @@ tab1, tab2 = st.tabs([
 ])
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 1
+# PESTAÑA 1: CARGAR LOTE Y ZONIFICAR
 # -----------------------------------------------------------------------------
 with tab1:
     st.markdown("### Paso 1: Cargar Lote y Procesar Zonas")
@@ -148,7 +144,7 @@ with tab1:
             st.map(pd.DataFrame(df_coords))
 
 # -----------------------------------------------------------------------------
-# PESTAÑA 2
+# PESTAÑA 2: ASIGNAR DOSIS Y DESCARGAR
 # -----------------------------------------------------------------------------
 with tab2:
     st.markdown("### Paso 2: Definir Dosis y Exportar Prescripción")
@@ -220,4 +216,3 @@ with tab2:
                 )
     else:
         st.warning("⚠️ Primero debes cargar y procesar tu lote en la Pestaña 1.")
-            )
