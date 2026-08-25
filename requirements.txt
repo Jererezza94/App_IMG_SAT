@@ -2,5 +2,6 @@ streamlit
 pandas
 numpy
 shapely
+scikit-learn
 folium
 streamlit-folium
